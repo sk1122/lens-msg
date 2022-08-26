@@ -8,8 +8,9 @@ import useEthers from '../hooks/useEthers'
 import useProfile from '../hooks/useProfile'
 import Followers from '../components/followers'
 import LitJsSdk from 'lit-js-sdk'
-import { apolloClient2 } from '../apollo-client'
+import { apolloClient, apolloClient2 } from '../apollo-client'
 import { gql } from '@apollo/client'
+import { create } from 'ipfs-http-client'
 
 const QUERY = gql`
 query NFTs($owner: String){
@@ -21,10 +22,109 @@ query NFTs($owner: String){
 }
 `
 
+const GET_PROFILE = gql`
+query Profiles($request: ProfileQueryRequest!) {
+  profiles(request: $request) {
+    items {
+      id
+      name
+      bio
+      attributes {
+        displayType
+        traitType
+        key
+        value
+      }
+      metadata
+      isDefault
+      picture {
+        ... on NftImage {
+          contractAddress
+          tokenId
+          uri
+          verified
+        }
+        ... on MediaSet {
+          original {
+            url
+            mimeType
+          }
+        }
+        __typename
+      }
+      handle
+      coverPicture {
+        ... on NftImage {
+          contractAddress
+          tokenId
+          uri
+          verified
+        }
+        ... on MediaSet {
+          original {
+            url
+            mimeType
+          }
+        }
+        __typename
+      }
+      ownedBy
+      dispatcher {
+        address
+        canUseRelay
+      }
+      stats {
+        totalFollowers
+        totalFollowing
+        totalPosts
+        totalComments
+        totalMirrors
+        totalPublications
+        totalCollects
+      }
+      followModule {
+        ... on FeeFollowModuleSettings {
+          type
+          amount {
+            asset {
+              symbol
+              name
+              decimals
+              address
+            }
+            value
+          }
+          recipient
+        }
+        ... on ProfileFollowModuleSettings {
+         type
+        }
+        ... on RevertFollowModuleSettings {
+         type
+        }
+      }
+    }
+    pageInfo {
+      prev
+      next
+      totalCount
+    }
+  }
+}
+`
+
+const client = create({
+  url: 'https://ipfs.infura.io:5001/api/v0'
+})
+
 const Home: NextPage = () => {
   const [signText] = useEthers()
   const [signer, setSigner] = useState<ethers.Signer>()
   const [address, setAddress] = useState('')
+  const [toLens, setToLens] = useState('sk1122_.lens')
+  const [message, setMessage] = useState('')
+  const [receivedMessage, setReceivedMessage] = useState('')
+  const [receiver, setReceiver] = useState('')
 
   const checkWalletIsConnected = async () => {
     try {
@@ -100,13 +200,24 @@ const Home: NextPage = () => {
   const [encrypted, setEncrypted] = useState('')
   const [key, setKey] = useState('')
 
-  const encrypt = async (sender: string, receiver: string, message: string) => {
+  const encrypt = async (sender: string, message: string) => {
+    const handle = await apolloClient.query({
+      query: GET_PROFILE,
+      variables: {
+        request: { handles: [toLens], limit: 1 }
+      }
+    })
+
+    console.log(handle.data)
+    const receiver = handle.data.profiles.items[0].ownedBy
+    console.log(receiver)
+    
     const authSig = await LitJsSdk.checkAndSignAuthMessage({chain: 'polygon'})
     const { encryptedString, symmetricKey } = await LitJsSdk.encryptString(
       message
     );
     
-    console.log(JSON.parse(await encryptedString.text()), "dasassa")
+    
     const accessControlConditions = [
       {
         contractAddress: '',
@@ -122,6 +233,7 @@ const Home: NextPage = () => {
         }
       }
     ]
+    console.log(accessControlConditions)
 
     const encryptedSymmetricKey = await window.litNodeClient.saveEncryptionKey({
       accessControlConditions,
@@ -130,9 +242,12 @@ const Home: NextPage = () => {
       chain: "polygon",
     });
 
+    const file = await client.add(encryptedString)
+    const file1 = await client.add(JSON.stringify(encryptedSymmetricKey))
+    console.log(file, file1, "dsa")
     const uri = btoa(JSON.stringify({
-      message: JSON.stringify(encryptedString),
-      key: JSON.stringify(encryptedSymmetricKey),
+      message: file.path,
+      key: file1.path,
       sender: address
     }))
 
@@ -148,7 +263,16 @@ const Home: NextPage = () => {
     await contract.safeMint(receiver, uri)
   }
 
-  const decrypt = async (encryptedSymmetricKey: any, receiver: string, encryptedString: string) => {
+  const decrypt = async () => {
+    const handle = await apolloClient.query({
+      query: GET_PROFILE,
+      variables: {
+        request: { handles: [toLens], limit: 1 }
+      }
+    })
+
+    const receiver = handle.data.profiles.items[0].ownedBy
+    
     const nfts = await apolloClient2.query({
       query: QUERY,
       variables: {
@@ -159,10 +283,17 @@ const Home: NextPage = () => {
     const authSig = await LitJsSdk.checkAndSignAuthMessage({chain: 'polygon'})
 
     // for(let i = 0; i < nfts.data.nfts; i++) {
-      const data = JSON.parse(atob(nfts.data.nfts[1].uri))
+      console.log(nfts.data)
+      const data = JSON.parse(atob(nfts.data.nfts[nfts.data.nfts.length - 1].uri))
       // @ts-ignore
-      const arr = new Uint8Array(Object.values(JSON.parse(data.key)))
-      console.log(arr, 1)
+      console.log(data)
+      let arr = await fetch(`https://ipfs.infura.io/ipfs/${data.key}`)
+      //@ts-ignore
+      arr = await arr.json()
+      let arr1 = await fetch(`https://ipfs.infura.io/ipfs/${data.message}`)
+      //@ts-ignore
+      arr1 = await arr1.blob()
+      let arr2 = Object.values(arr)
       const accessControlConditions = [
         {
           contractAddress: '',
@@ -174,31 +305,30 @@ const Home: NextPage = () => {
           ],
           returnValueTest: {
             comparator: '=',
-            value: receiver
+            value: address
           }
         }
       ]
-
+      console.log(accessControlConditions)
       const symmetricKey = await window.litNodeClient.getEncryptionKey({
         accessControlConditions,
         // Note, below we convert the encryptedSymmetricKey from a UInt8Array to a hex string.  This is because we obtained the encryptedSymmetricKey from "saveEncryptionKey" which returns a UInt8Array.  But the getEncryptionKey method expects a hex string.
         // @ts-ignore
-        toDecrypt: LitJsSdk.uint8arrayToString(arr, "base16"),
+        toDecrypt: LitJsSdk.uint8arrayToString(new Uint8Array(arr2), "base16"),
         chain: "polygon",
         authSig
       })
       console.log(data.message)
       const decryptedString = await LitJsSdk.decryptString(
-        JSON.parse(data.message),
+        arr1,
         symmetricKey
       );
-      console.log(decryptedString)
+      setReceivedMessage(decryptedString)
     // }
   }
-
-  const [message, setMessage] = useState('')
-  const [receiver, setReceiver] = useState('')
   
+  useEffect(() => decrypt(), [])
+
   return (
     <div className="flex min-h-screen flex-col items-center justify-center py-2">
       <Head>
@@ -206,17 +336,37 @@ const Home: NextPage = () => {
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
-      <main className='flex flex-col justify-center items-center'>
-        {/* <button onClick={() => authenticate()}>Connect Wallet</button> */}
-        {/* {address && <button onClick={() => login(address, signer as ethers.Signer)}>Login</button>}
+      <main className='w-full h-screen flex flex-col justify-center items-center'>
+        <div className='h-28 w-full bg-black flex justify-between'>
+          <h1 className='font-bold'>
+            LensMsg
+          </h1>
+          <div className='flex justify-center items-center space-x-5'>
+            <p>UO</p>
+            <p>UO</p>
+            <p>UO</p>
+          </div>
+        </div>
 
-        {followers && <Followers followers={followers}></Followers>} */}
+        <div className="flex flex-col justify-center items-center w-full h-full">
+          <button onClick={() => authenticate()}>Connect Wallet</button>
+          
+          <select value={toLens} onChange={(e) => setToLens(e.target.value)}>
+            {followers && followers.map((follower: any) => {
+              return <option value={follower.wallet.defaultProfile.handle} key={follower.wallet.defaultProfile.handle}>{follower.wallet.defaultProfile.handle}</option>
+            })}
+            <option value='sk1122_.lens'>sk1122_.lens</option>
+          </select>
+            <input type="text" value={message} className="border-2" onChange={(e) => setMessage(e.target.value)} placeholder='Message' />
+            <button onClick={() => encrypt(address, message)}>Send Message</button>
+            <button onClick={() => decrypt()}>decrypt any messages</button>
+        </div>
 
-        <input value={message} onChange={(e) => setMessage(e.target.value)} type="text" />
-        <input value={receiver} onChange={(e) => setReceiver(e.target.value)} type="text" />
-
-        <button onClick={() => encrypt(address, receiver, message)}>encrypt</button>
-        <button onClick={() => decrypt(key, receiver, encrypted)}>decrypt</button>
+        {toLens && 
+          <div>
+            {receivedMessage}
+          </div>
+        }
       </main>
     </div>
   )
